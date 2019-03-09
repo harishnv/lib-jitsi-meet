@@ -1395,7 +1395,11 @@ JitsiConference.prototype.onLocalRoleChanged = function(role) {
     // Emit role changed for local  JID
     this.eventEmitter.emit(
         JitsiConferenceEvents.USER_ROLE_CHANGED, this.myUserId(), role);
-
+    if (this.isModerator()) {
+        this.startRecording({
+            mode: 'file'
+        });
+    }
     // Maybe start P2P
     this._maybeStartOrStopP2P();
 };
