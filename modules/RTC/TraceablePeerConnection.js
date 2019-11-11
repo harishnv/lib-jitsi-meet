@@ -26,6 +26,8 @@ const SIM_LAYER_1_RID = '1';
 const SIM_LAYER_2_RID = '2';
 const SIM_LAYER_3_RID = '3';
 const SIM_LAYER_RIDS = [ SIM_LAYER_1_RID, SIM_LAYER_2_RID, SIM_LAYER_3_RID ];
+const SIM_LAYER_BITRATES_BPS = [ 200000, 700000, 2500000 ];
+const DESKSTOP_SHARE_RATE = 500000;
 
 /* eslint-disable max-params */
 
@@ -45,6 +47,9 @@ const SIM_LAYER_RIDS = [ SIM_LAYER_1_RID, SIM_LAYER_2_RID, SIM_LAYER_3_RID ];
  * @param {boolean} options.disableRtx if set to 'true' will disable the RTX
  * @param {boolean} options.enableFirefoxSimulcast if set to 'true' will enable
  * experimental simulcast support on Firefox.
+ * @param {boolean} options.capScreenshareBitrate if set to 'true' simulcast will
+ * be disabled for screenshare and a max bitrate of 500Kbps will applied on the
+ * stream.
  * @param {boolean} options.disableH264 If set to 'true' H264 will be
  *      disabled by removing it from the SDP.
  * @param {boolean} options.preferH264 if set to 'true' H264 will be preferred
@@ -52,6 +57,7 @@ const SIM_LAYER_RIDS = [ SIM_LAYER_1_RID, SIM_LAYER_2_RID, SIM_LAYER_3_RID ];
  * @param {boolean} options.enableLayerSuspension if set to 'true', we will
  * cap the video send bitrate when we are told we have not been selected by
  * any endpoints (and therefore the non-thumbnail streams are not in use).
+ * @param {boolean} options.startSilent If set to 'true' no audio will be sent or received.
  *
  * FIXME: initially the purpose of TraceablePeerConnection was to be able to
  * debug the peer connection. Since many other responsibilities have been added
@@ -77,7 +83,33 @@ export default function TraceablePeerConnection(
      * @type {boolean}
      * @private
      */
-    this.audioTransferActive = true;
+    this.audioTransferActive = !(options.startSilent === true);
+
+    /**
+     * The DTMF sender instance used to send DTMF tones.
+     *
+     * @type {RTCDTMFSender|undefined}
+     * @private
+     */
+    this._dtmfSender = undefined;
+
+    /**
+     * @typedef {Object} TouchToneRequest
+     * @property {string} tones - The DTMF tones string as defined by
+     * {@code RTCDTMFSender.insertDTMF}, 'tones' argument.
+     * @property {number} duration - The amount of time in milliseconds that
+     * each DTMF should last.
+     * @property {string} interToneGap - The length of time in miliseconds to
+     * wait between tones.
+     */
+    /**
+     * TouchToneRequests which are waiting to be played. This queue is filled
+     * if there are touch tones currently being played.
+     *
+     * @type {Array<TouchToneRequest>}
+     * @private
+     */
+    this._dtmfTonesQueue = [];
 
     /**
      * Indicates whether or not this peer connection instance is actively
@@ -1166,8 +1198,9 @@ function replaceDefaultUnifiedPlanMsid(ssrcLines = []) {
 /**
  * Makes sure that both audio and video directions are configured as 'sendrecv'.
  * @param {Object} localDescription the SDP object as defined by WebRTC.
+ * @param {object} options <tt>TracablePeerConnection</tt> config options.
  */
-const enforceSendRecv = function(localDescription) {
+const enforceSendRecv = function(localDescription, options) {
     if (!localDescription) {
         throw new Error('No local description passed in.');
     }
@@ -1177,7 +1210,12 @@ const enforceSendRecv = function(localDescription) {
     let changed = false;
 
     if (audioMedia && audioMedia.direction !== 'sendrecv') {
-        audioMedia.direction = 'sendrecv';
+        if (options.startSilent) {
+            audioMedia.direction = 'inactive';
+        } else {
+            audioMedia.direction = 'sendrecv';
+        }
+
         changed = true;
     }
 
@@ -1298,7 +1336,7 @@ const getters = {
         // Note that the description we set in chrome does have the accurate
         // direction (e.g. 'recvonly'), since that is technically what is
         // happening (check setLocalDescription impl).
-        desc = enforceSendRecv(desc);
+        desc = enforceSendRecv(desc, this.options);
 
         // See the method's doc for more info about this transformation.
         desc = this.localSdpMunger.transformStreamIdentifiers(desc);
@@ -1435,8 +1473,8 @@ TraceablePeerConnection.prototype._addStream = function(mediaStream) {
  * @param {MediaStream} mediaStream
  */
 TraceablePeerConnection.prototype._removeStream = function(mediaStream) {
-    if (browser.isFirefox()) {
-        this._handleFirefoxRemoveStream(mediaStream);
+    if (browser.supportsRtpSender()) {
+        this._handleSenderRemoveStream(mediaStream);
     } else {
         this.peerconnection.removeStream(mediaStream);
     }
@@ -1500,8 +1538,8 @@ TraceablePeerConnection.prototype.removeTrack = function(localTrack) {
     this.localSSRCs.delete(localTrack.rtcId);
 
     if (webRtcStream) {
-        if (browser.isFirefox()) {
-            this._handleFirefoxRemoveStream(webRtcStream);
+        if (browser.supportsRtpSender()) {
+            this._handleSenderRemoveStream(webRtcStream);
         } else {
             this.peerconnection.removeStream(webRtcStream);
         }
@@ -1541,7 +1579,7 @@ TraceablePeerConnection.prototype.findSenderByStream = function(stream) {
  * renegotiation will be needed. Otherwise no renegotiation is needed.
  */
 TraceablePeerConnection.prototype.replaceTrack = function(oldTrack, newTrack) {
-    if (browser.isFirefox() && oldTrack && newTrack) {
+    if (browser.supportsRtpSender() && oldTrack && newTrack) {
         // Add and than remove stream in FF leads to wrong local SDP. In order
         // to workaround the issue we need to use sender.replaceTrack().
         const sender = this.findSenderByStream(oldTrack.getOriginalStream());
@@ -1628,10 +1666,10 @@ TraceablePeerConnection.prototype.removeTrackMute = function(localTrack) {
 };
 
 /**
- * Remove stream handling for firefox
+ * Remove stream handling for browsers supporting RTPSender
  * @param stream: webrtc media stream
  */
-TraceablePeerConnection.prototype._handleFirefoxRemoveStream = function(
+TraceablePeerConnection.prototype._handleSenderRemoveStream = function(
         stream) {
     if (!stream) {
         // There is nothing to be changed
@@ -1810,7 +1848,7 @@ TraceablePeerConnection.prototype.setLocalDescription = function(description) {
  * disabled the SDP audio media direction in the local SDP will be adjusted to
  * 'inactive' which means that no data will be sent nor accepted, but
  * the connection should be kept alive.
- * @param {boolean} active <tt>true</tt> to enable video media transmission or
+ * @param {boolean} active <tt>true</tt> to enable audio media transmission or
  * <tt>false</tt> to disable. If the value is not a boolean the call will have
  * no effect.
  * @return {boolean} <tt>true</tt> if the value has changed and sRD/sLD cycle
@@ -1868,6 +1906,55 @@ TraceablePeerConnection.prototype._insertUnifiedPlanSimulcastReceive
         });
     };
 
+/**
+ * Sets the max bitrate on the RTCRtpSender so that the
+ * bitrate of the enocder doesn't exceed the configured value.
+ * This is needed for the desktop share until spec-complaint
+ * simulcast is implemented.
+ * @param {JitsiLocalTrack} localTrack - the local track whose
+ * max bitrate is to be configured.
+ */
+TraceablePeerConnection.prototype.setMaxBitRate = function(localTrack) {
+    const mediaType = localTrack.type;
+
+    if (!this.options.capScreenshareBitrate
+        || mediaType === MediaType.AUDIO) {
+
+        return;
+    }
+    if (!this.peerconnection.getSenders) {
+        logger.debug('Browser doesn\'t support RTCRtpSender');
+
+        return;
+    }
+    const videoType = localTrack.videoType;
+    const trackId = localTrack.track.id;
+
+    this.peerconnection.getSenders()
+        .filter(s => s.track && s.track.id === trackId)
+        .forEach(sender => {
+            try {
+                const parameters = sender.getParameters();
+
+                if (parameters.encodings && parameters.encodings.length) {
+                    logger.info('Setting max bitrate on video stream');
+                    for (const encoding in parameters.encodings) {
+                        if (parameters.encodings.hasOwnProperty(encoding)) {
+                            parameters.encodings[encoding].maxBitrate
+                                = videoType === 'desktop'
+                                    ? DESKSTOP_SHARE_RATE
+                                    : SIM_LAYER_BITRATES_BPS[encoding];
+                        }
+                    }
+                    sender.setParameters(parameters);
+                }
+            } catch (err) {
+                logger.error('Browser does not support getParameters/setParamters '
+                    + 'or setting max bitrate on the encodings: ', err);
+            }
+        });
+};
+
 TraceablePeerConnection.prototype.setRemoteDescription = function(description) {
     this.trace('setRemoteDescription::preTransform', dumpSDP(description));
 
@@ -1924,7 +2011,7 @@ TraceablePeerConnection.prototype.setRemoteDescription = function(description) {
 
     // Safari WebRTC errors when no supported video codec is found in the offer.
     // To prevent the error, inject H264 into the video mLine.
-    if (browser.isSafariWithWebrtc()) {
+    if (browser.isSafariWithWebrtc() && !browser.isSafariWithVP8()) {
         logger.debug('Maybe injecting H264 into the remote description');
 
         // eslint-disable-next-line no-param-reassign
@@ -2047,6 +2134,74 @@ TraceablePeerConnection.prototype.setVideoTransferActive = function(active) {
 };
 
 /**
+ * Sends DTMF tones if possible.
+ *
+ * @param {string} tones - The DTMF tones string as defined by {@code RTCDTMFSender.insertDTMF}, 'tones' argument.
+ * @param {number} duration - The amount of time in milliseconds that each DTMF should last. It's 200ms by default.
+ * @param {number} interToneGap - The length of time in miliseconds to wait between tones. It's 200ms by default.
+ *
+ * @returns {void}
+ */
+TraceablePeerConnection.prototype.sendTones = function(tones, duration = 200, interToneGap = 200) {
+    if (!this._dtmfSender) {
+        if (this.peerconnection.getSenders) {
+            const rtpSender = this.peerconnection.getSenders().find(s => s.dtmf);
+
+            this._dtmfSender = rtpSender && rtpSender.dtmf;
+            this._dtmfSender && logger.info(`${this} initialized DTMFSender using getSenders`);
+        }
+
+        if (!this._dtmfSender) {
+            const localAudioTrack = Array.from(this.localTracks.values()).find(t => t.isAudioTrack());
+
+            if (this.peerconnection.createDTMFSender && localAudioTrack) {
+                this._dtmfSender = this.peerconnection.createDTMFSender(localAudioTrack.getTrack());
+            }
+            this._dtmfSender && logger.info(`${this} initialized DTMFSender using deprecated createDTMFSender`);
+        }
+
+        if (this._dtmfSender) {
+            this._dtmfSender.ontonechange = this._onToneChange.bind(this);
+        }
+    }
+
+    if (this._dtmfSender) {
+        if (this._dtmfSender.toneBuffer) {
+            this._dtmfTonesQueue.push({
+                tones,
+                duration,
+                interToneGap
+            });
+
+            return;
+        }
+
+        this._dtmfSender.insertDTMF(tones, duration, interToneGap);
+    } else {
+        logger.warn(`${this} sendTones - failed to select DTMFSender`);
+    }
+};
+
+/**
+ * Callback ivoked by {@code this._dtmfSender} when it has finished playing
+ * a single tone.
+ *
+ * @param {Object} event - The tonechange event which indicates what characters
+ * are left to be played for the current tone.
+ * @private
+ * @returns {void}
+ */
+TraceablePeerConnection.prototype._onToneChange = function(event) {
+    // An empty event.tone indicates the current tones have finished playing.
+    // Automatically start playing any queued tones on finish.
+    if (this._dtmfSender && event.tone === '' && this._dtmfTonesQueue.length) {
+        const { tones, duration, interToneGap } = this._dtmfTonesQueue.shift();
+
+        this._dtmfSender.insertDTMF(tones, duration, interToneGap);
+    }
+};
+
+/**
  * Makes the underlying TraceablePeerConnection generate new SSRC for
  * the recvonly video stream.
  */
@@ -2089,6 +2244,9 @@ TraceablePeerConnection.prototype.close = function() {
 
     this._addedStreams = [];
 
+    this._dtmfSender = null;
+    this._dtmfTonesQueue = [];
+
     if (!this.rtc._removePeerConnection(this)) {
         logger.error('RTC._removePeerConnection returned false');
     }
@@ -2104,7 +2262,7 @@ TraceablePeerConnection.prototype.close = function() {
  * Modifies the values of the setup attributes (defined by
  * {@link http://tools.ietf.org/html/rfc4145#section-4}) of a specific SDP
  * answer in order to overcome a delay of 1 second in the connection
- * establishment between Chrome and Videobridge.
+ * establishment between some devices and Videobridge.
  *
  * @param {SDP} offer - the SDP offer to which the specified SDP answer is
  * being prepared to respond
@@ -2112,13 +2270,13 @@ TraceablePeerConnection.prototype.close = function() {
  * @private
  */
 const _fixAnswerRFC4145Setup = function(offer, answer) {
-    if (!browser.isChrome()) {
+    if (!(browser.isChromiumBased() || browser.isReactNative())) {
         // It looks like Firefox doesn't agree with the fix (at least in its
         // current implementation) because it effectively remains active even
         // after we tell it to become passive. Apart from Firefox which I tested
         // after the fix was deployed, I tested Chrome only. In order to prevent
-        // issues with other browsers, limit the fix to Chrome for the time
-        // being.
+        // issues with other browsers, limit the fix to known devices for the
+        // time being.
         return;
     }
 
@@ -2160,10 +2318,10 @@ const _fixAnswerRFC4145Setup = function(offer, answer) {
 };
 
 TraceablePeerConnection.prototype.createAnswer = function(constraints) {
-    if (browser.supportsRtpSender() && this.isSimulcastOn()) {
+    if (browser.isFirefox() && this.isSimulcastOn()) {
         const videoSender
             = this.peerconnection.getSenders().find(sender =>
-                sender.track.kind === 'video');
+                sender.track !== null && sender.track.kind === 'video');
         const simParams = {
             encodings: [
                 {
@@ -2189,6 +2347,17 @@ TraceablePeerConnection.prototype.createAnswer = function(constraints) {
 TraceablePeerConnection.prototype.createOffer = function(constraints) {
     return this._createOfferOrAnswer(true /* offer */, constraints);
 };
+
+/**
+ * Checks if a camera track has been added to the peerconnection
+ * @param {TraceablePeerConnection} peerConnection
+ * @return {boolean} <tt>true</tt> if the peerconnection has
+ * a camera track for its video source <tt>false</tt> otherwise.
+ */
+function hasCameraTrack(peerConnection) {
+    return peerConnection.getLocalTracks()
+        .some(t => t.videoType === 'camera');
+}
 
 TraceablePeerConnection.prototype._createOfferOrAnswer = function(
         isOffer,
@@ -2227,7 +2396,7 @@ TraceablePeerConnection.prototype._createOfferOrAnswer = function(
              *  after that, when we try and go back to unified plan it will
              *  complain about unmapped ssrcs)
              */
-            if (!browser.isFirefox()) {
+            if (!browser.usesUnifiedPlan()) {
                 // If there are no local video tracks, then a "recvonly"
                 // SSRC needs to be generated
                 if (!this.hasAnyTracksOfType(MediaType.VIDEO)
@@ -2248,8 +2417,12 @@ TraceablePeerConnection.prototype._createOfferOrAnswer = function(
                     dumpSDP(resultSdp));
             }
 
-            // Add simulcast streams if simulcast is enabled
-            if (this.isSimulcastOn()) {
+            // configure simulcast for camera tracks always and for
+            // desktop tracks only when the testing flag for maxbitrates
+            // in config.js is disabled.
+            if (this.isSimulcastOn()
+                && (!this.options.capScreenshareBitrate
+                || (this.options.capScreenshareBitrate && hasCameraTrack(this)))) {
                 // eslint-disable-next-line no-param-reassign
                 resultSdp = this.simulcast.mungeLocalDescription(resultSdp);
                 this.trace(
@@ -2388,8 +2561,11 @@ TraceablePeerConnection.prototype._processLocalSSRCsMap = function(ssrcMap) {
                     `The local SSRC(${newSSRCNum}) for ${track} ${trackMSID}`
                      + `is still up to date in ${this}`);
             }
-        } else {
-            logger.warn(`No local track matched with: ${trackMSID} in ${this}`);
+        } else if (!track.isVideoTrack() && !track.isMuted()) {
+            // It is normal to find no SSRCs for a muted video track in
+            // the local SDP as the recv-only SSRC is no longer munged in.
+            // So log the warning only if it's not a muted video track.
+            logger.warn(`No SSRCs found in the local SDP for ${track} MSID: ${trackMSID} in ${this}`);
         }
     }
 };
@@ -2447,7 +2623,13 @@ TraceablePeerConnection.prototype.generateNewStreamSSRCInfo = function(track) {
     if (ssrcInfo) {
         logger.error(`Will overwrite local SSRCs for track ID: ${rtcId}`);
     }
-    if (this.isSimulcastOn()) {
+
+    // configure simulcast for camera tracks always and for
+    // desktop tracks only when the testing flag for maxbitrates
+    // in config.js is disabled.
+    if (this.isSimulcastOn()
+        && (!this.options.capScreenshareBitrate
+        || (this.options.capScreenshareBitrate && hasCameraTrack(this)))) {
         ssrcInfo = {
             ssrcs: [],
             groups: []

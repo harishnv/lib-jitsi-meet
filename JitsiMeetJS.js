@@ -273,11 +273,23 @@ export default _mergeNamespaceAndModule({
     },
 
     /**
+    * Sets global options which will be used by all loggers. Changing these
+    * works even after other loggers are created.
+    *
+    * @param options
+    * @see Logger.setGlobalOptions
+    */
+    setGlobalLogOptions(options) {
+        Logger.setGlobalOptions(options);
+    },
+
+    /**
      * Creates the media tracks and returns them trough the callback.
      *
      * @param options Object with properties / settings specifying the tracks
      * which should be created. should be created or some additional
      * configurations about resolution for example.
+     * @param {Array} options.effects optional effects array for the track
      * @param {Array} options.devices the devices that will be requested
      * @param {string} options.resolution resolution constraints
      * @param {string} options.cameraDeviceId
@@ -371,6 +383,15 @@ export default _mergeNamespaceAndModule({
 
                         track._setRealDeviceIdFromDeviceList(
                             currentlyAvailableMediaDevices);
+                    }
+                }
+
+                // set the contentHint to "detail" for desktop tracks
+                // eslint-disable-next-line prefer-const
+                for (const track of tracks) {
+                    if (track.type === MediaType.VIDEO
+                        && track.videoType === 'desktop') {
+                        this.setVideoTrackContentHints(track.track, 'detail');
                     }
                 }
 
@@ -551,6 +572,24 @@ export default _mergeNamespaceAndModule({
             `Column: ${colno}`,
             'StackTrace: ', error);
         Statistics.reportGlobalError(error);
+    },
+
+    /**
+     * Set the contentHint on the transmitted stream track to indicate
+     * charaterstics in the video stream, which informs PeerConnection
+     * on how to encode the track (to prefer motion or individual frame detail)
+     * @param {MediaStreamTrack} track - the track that is transmitted
+     * @param {String} hint - contentHint value that needs to be set on the track
+     */
+    setVideoTrackContentHints(track, hint) {
+        if ('contentHint' in track) {
+            track.contentHint = hint;
+            if (track.contentHint !== hint) {
+                logger.debug('Invalid video track contentHint');
+            }
+        } else {
+            logger.debug('MediaStreamTrack contentHint attribute not supported');
+        }
     },
 
     /* eslint-enable max-params */

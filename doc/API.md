@@ -66,11 +66,12 @@ JitsiMeetJS.setLogLevel(JitsiMeetJS.logLevels.ERROR);
     - options - JS object with configuration options for the local media tracks. You can change the following properties there:
         1. devices - array with the devices - "desktop", "video" and "audio" that will be passed to GUM. If that property is not set GUM will try to get all available devices.
         2. resolution - the prefered resolution for the local video.
-        3. cameraDeviceId - the deviceID for the video device that is going to be used
-        4. micDeviceId - the deviceID for the audio device that is going to be used
-        5. minFps - the minimum frame rate for the video stream (passed to GUM)
-        6. maxFps - the maximum frame rate for the video stream (passed to GUM)
-        7. facingMode - facing mode for a camera (possible values - 'user', 'environment')
+        3. constraints - the prefered encoding properties for the created track (replaces 'resolution' in newer releases of browsers)
+        4. cameraDeviceId - the deviceID for the video device that is going to be used
+        5. micDeviceId - the deviceID for the audio device that is going to be used
+        6. minFps - the minimum frame rate for the video stream (passed to GUM)
+        7. maxFps - the maximum frame rate for the video stream (passed to GUM)
+        8. facingMode - facing mode for a camera (possible values - 'user', 'environment')
     - firePermissionPromptIsShownEvent - optional boolean parameter. If set to ```true```, ```JitsiMediaDevicesEvents.PERMISSION_PROMPT_IS_SHOWN``` will be fired when browser shows gUM permission prompt.
 
 * ```JitsiMeetJS.enumerateDevices(callback)``` - __DEPRECATED__. Use ```JitsiMeetJS.mediaDevices.enumerateDevices(callback)``` instead.
@@ -100,6 +101,7 @@ JitsiMeetJS.setLogLevel(JitsiMeetJS.logLevels.ERROR);
         - TRACK_ADDED - stream received. (parameters - JitsiTrack)
         - TRACK_REMOVED - stream removed. (parameters - JitsiTrack)
         - TRACK_MUTE_CHANGED - JitsiTrack was muted or unmuted. (parameters - JitsiTrack)
+        - TRACK_AUDIO_LEVEL_CHANGED - audio level of JitsiTrack has changed. (parameters - participantId(string), audioLevel(number))
         - DOMINANT_SPEAKER_CHANGED - the dominant speaker is changed. (parameters - id(string))
         - USER_JOINED - new user joined a conference. (parameters - id(string), user(JitsiParticipant))
         - USER_LEFT - a participant left conference. (parameters - id(string), user(JitsiParticipant))
@@ -224,7 +226,9 @@ This objects represents the server connection. You can create new ```JitsiConnec
         6. enableTalkWhileMuted - boolean property. Enables/disables talk while muted detection, by default the value is false/disabled.
         7. ignoreStartMuted - ignores start muted events coming from jicofo.
         8. enableStatsID - enables sending callStatsUsername as stats-id in presence, jicofo and videobridge will use it as endpointID to report stats
-        9. enableDisplayNameInStats - enables sending the users display name, if set, to callstats as alias of the endpointID stats 
+        9. enableDisplayNameInStats - enables sending the users display name, if set, to callstats as alias of the endpointID stats
+        10. startSilent - enables silent mode, will mark audio as inactive will not send/receive audio
+        11. confID - Used for statistics to identify conference, if tenants are supported will contain tenant and the non lower case variant for the room name.
 
         **NOTE: if 4 and 5 are set the library is going to send events to callstats. Otherwise the callstats integration will be disabled.**
 
@@ -275,7 +279,10 @@ The object represents a conference. We have the following methods to control the
 10. setDisplayName(name) - changes the display name of the local participant.
     - name - the new display name
 
-11. selectParticipant(participantID) - Elects the participant with the given id to be the selected participant or the speaker. You should use that method if you are using simulcast.
+11. selectParticipant(participantId) - Elects the participant with the given id to be the selected participant in order to receive higher video quality (if simulcast is enabled).
+    - participantId - the identifier of the participant
+
+Throws NetworkError or InvalidStateError or Error if the operation fails.
 
 
 12. sendCommand(name, values) - sends user defined system command to the other participants
@@ -374,15 +381,15 @@ Throws NetworkError or InvalidStateError or Error if the operation fails.
 
 Throws NetworkError or InvalidStateError or Error if the operation fails.
 
-33. selectParticipant(participantId) - Elects the participant with the given id to be the selected participant in order to receive higher video quality (if simulcast is enabled).
+33. pinParticipant(participantId) - Elects the participant with the given id to be the pinned participant in order to always receive video for this participant (even when last n is enabled).
     - participantId - the identifier of the participant
 
 Throws NetworkError or InvalidStateError or Error if the operation fails.
 
-34. pinParticipant(participantId) - Elects the participant with the given id to be the pinned participant in order to always receive video for this participant (even when last n is enabled).
-    - participantId - the identifier of the participant
+34. setReceiverVideoConstraint(resolution) - set the desired resolution to get from JVB (180, 360, 720, 1080, etc).
+    You should use that method if you are using simulcast.
 
-Throws NetworkError or InvalidStateError or Error if the operation fails.
+35. isHidden - checks if local user has joined as a "hidden" user. This is a specialized role used for integrations.
 
 JitsiTrack
 ======

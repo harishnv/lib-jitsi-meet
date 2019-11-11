@@ -345,6 +345,7 @@ export default class ChatRoom extends Listenable {
             member.status = statusEl.textContent || '';
         }
         let hasStatusUpdate = false;
+        let hasVersionUpdate = false;
         const xElement
             = pres.getElementsByTagNameNS(
                 'http://jabber.org/protocol/muc#user', 'x')[0];
@@ -435,6 +436,19 @@ export default class ChatRoom extends Listenable {
             case 'identity':
                 member.identity = extractIdentityInformation(node);
                 break;
+            case 'stat': {
+                const { attributes } = node;
+
+                if (!attributes) {
+                    break;
+                }
+                const { name } = attributes;
+
+                if (name === 'version') {
+                    member.version = attributes.value;
+                }
+                break;
+            }
             }
         }
 
@@ -460,13 +474,20 @@ export default class ChatRoom extends Listenable {
                     this.locked = true;
                 }
 
+                // Re-send presence in case any presence updates were added,
+                // but blocked from sending, during the join process.
+                this.sendPresence();
+
                 this.eventEmitter.emit(XMPPEvents.MUC_JOINED);
             }
+        } else if (jid === undefined) {
+            logger.info('Ignoring member with undefined JID');
         } else if (this.members[from] === undefined) {
             // new participant
             this.members[from] = member;
             logger.log('entered', from, member);
             hasStatusUpdate = member.status !== undefined;
+            hasVersionUpdate = member.version !== undefined;
             if (member.isFocus) {
                 this._initFocus(from, jid);
             } else {
@@ -532,6 +553,11 @@ export default class ChatRoom extends Listenable {
             if (memberOfThis.status !== member.status) {
                 hasStatusUpdate = true;
                 memberOfThis.status = member.status;
+            }
+
+            if (memberOfThis.version !== member.version) {
+                hasVersionUpdate = true;
+                memberOfThis.version = member.version;
             }
         }
 
@@ -618,6 +644,10 @@ export default class ChatRoom extends Listenable {
                 XMPPEvents.PRESENCE_STATUS,
                 from,
                 member.status);
+        }
+
+        if (hasVersionUpdate) {
+            logger.info(`Received version for ${jid}: ${member.version}`);
         }
     }
 
@@ -804,6 +834,31 @@ export default class ChatRoom extends Listenable {
                 .length;
         const membersKeys = Object.keys(this.members);
 
+        if (isKick) {
+            const actorSelect
+                = $(pres)
+                .find('>x[xmlns="http://jabber.org/protocol/muc#user"]>item>actor');
+
+            let actorNick;
+
+            if (actorSelect.length) {
+                actorNick = actorSelect.attr('nick');
+            }
+
+            // if no member is found this is the case we had kicked someone
+            // and we are not in the list of members
+            if (membersKeys.find(jid => Strophe.getResourceFromJid(jid) === actorNick)) {
+                // we first fire the kicked so we can show the participant
+                // who kicked, before notifying that participant left
+                // we fire kicked for us and for any participant kicked
+                this.eventEmitter.emit(
+                    XMPPEvents.KICKED,
+                    isSelfPresence,
+                    actorNick,
+                    Strophe.getResourceFromJid(from));
+            }
+        }
+
         if (!isSelfPresence) {
             delete this.members[from];
             this.onParticipantLeft(from, false);
@@ -825,10 +880,6 @@ export default class ChatRoom extends Listenable {
                 this.eventEmitter.emit(XMPPEvents.MUC_LEFT);
             }
         }
-
-        if (isKick && this.myroomjid === from) {
-            this.eventEmitter.emit(XMPPEvents.KICKED);
-        }
     }
 
     /**
@@ -842,16 +893,17 @@ export default class ChatRoom extends Listenable {
                 .text()
             || Strophe.getResourceFromJid(from);
 
-        const txt = $(msg).find('>body').text();
         const type = msg.getAttribute('type');
 
         if (type === 'error') {
-            this.eventEmitter.emit(XMPPEvents.CHAT_ERROR_RECEIVED,
-                $(msg).find('>text').text(), txt);
+            const errorMsg = $(msg).find('>error>text').text();
+
+            this.eventEmitter.emit(XMPPEvents.CHAT_ERROR_RECEIVED, errorMsg);
 
             return true;
         }
 
+        const txt = $(msg).find('>body').text();
         const subject = $(msg).find('>subject');
 
         if (subject.length) {
@@ -1051,6 +1103,16 @@ export default class ChatRoom extends Listenable {
         values.tagName = key;
         this.removeFromPresence(key);
         this.presMap.nodes.push(values);
+    }
+
+    /**
+     * Retreives a value from the presence map.
+     *
+     * @param {string} key - The key to find the value for.
+     * @returns {Object?}
+     */
+    getFromPresence(key) {
+        return this.presMap.nodes.find(node => key === node.tagName);
     }
 
     /**
@@ -1340,7 +1402,7 @@ export default class ChatRoom extends Listenable {
         const mute = $(iq).find('mute');
 
         if (mute.length && mute.text() === 'true') {
-            this.eventEmitter.emit(XMPPEvents.AUDIO_MUTED_BY_FOCUS);
+            this.eventEmitter.emit(XMPPEvents.AUDIO_MUTED_BY_FOCUS, mute.attr('actor'));
         } else {
             // XXX Why do we support anything but muting? Why do we encode the
             // value in the text of the element? Why do we use a separate XML

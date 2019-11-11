@@ -78,16 +78,36 @@ export default class BrowserCapabilities extends BrowserDetection {
     }
 
     /**
+     * Checks if current browser is a Safari and a version of Safari that
+     * supports VP8.
+     *
+     * @returns {boolean}
+     */
+    isSafariWithVP8() {
+        return this.isSafari()
+            && !this.isVersionLessThan('12.1');
+    }
+
+    /**
      * Checks if the current browser is supported.
      *
      * @returns {boolean} true if the browser is supported, false otherwise.
      */
     isSupported() {
         return this.isChromiumBased()
-            || this.isEdge()
             || this.isFirefox()
             || this.isReactNative()
             || this.isSafariWithWebrtc();
+    }
+
+    /**
+     * Returns whether or not the current environment needs a user interaction
+     * with the page before any unmute can occur.
+     *
+     * @returns {boolean}
+     */
+    isUserInteractionRequiredForUnmute() {
+        return (this.isFirefox() && this.isVersionLessThan('68')) || this.isSafari();
     }
 
     /**
@@ -97,7 +117,8 @@ export default class BrowserCapabilities extends BrowserDetection {
      * otherwise.
      */
     supportsVideoMuteOnConnInterrupted() {
-        return this.isChromiumBased() || this.isReactNative();
+        return this.isChromiumBased() || this.isReactNative()
+            || this.isSafariWithVP8();
     }
 
     /**
@@ -132,17 +153,6 @@ export default class BrowserCapabilities extends BrowserDetection {
     }
 
     /**
-     * Checks if the current browser supports the MediaStream constructor as
-     * defined by https://www.w3.org/TR/mediacapture-streams/#constructors. In
-     * cases where there is no support, it maybe be necessary to get audio
-     * and video in two distinct GUM calls.
-     * @return {boolean}
-     */
-    supportsMediaStreamConstructor() {
-        return !this.isReactNative();
-    }
-
-    /**
      * Checks if the current browser supports RTP statictics collecting.
      * Required by {@link RTPStatsCollector}.
      *
@@ -161,7 +171,8 @@ export default class BrowserCapabilities extends BrowserDetection {
      * candidates through the legacy getStats() API.
      */
     supportsLocalCandidateRttStatistics() {
-        return this.isChromiumBased() || this.isReactNative();
+        return this.isChromiumBased() || this.isReactNative()
+            || this.isSafariWithVP8();
     }
 
     /**
@@ -187,7 +198,7 @@ export default class BrowserCapabilities extends BrowserDetection {
      * @returns {boolean}
      */
     supportsRtpSender() {
-        return this.isFirefox();
+        return this.isFirefox() || this.isSafariWithVP8();
     }
 
     /**
@@ -196,7 +207,7 @@ export default class BrowserCapabilities extends BrowserDetection {
      * @returns {boolean}
      */
     supportsRtx() {
-        return !this.isFirefox();
+        return !this.isFirefox() && !this.usesUnifiedPlan();
     }
 
     /**
@@ -204,8 +215,8 @@ export default class BrowserCapabilities extends BrowserDetection {
      * @returns {boolean}
      */
     supportsSimulcast() {
-        return this.isChromiumBased()
-            || this.isFirefox() || this.isReactNative();
+        return this.isChromiumBased() || this.isFirefox()
+            || this.isSafariWithVP8() || this.isReactNative();
     }
 
     /**
@@ -218,9 +229,11 @@ export default class BrowserCapabilities extends BrowserDetection {
         // FIXME: Check if we can use supportsVideoOut and supportsVideoIn. I
         // leave the old implementation here in order not to brake something.
 
-        // Currently Safari using webrtc/adapter does not support video due in
-        // part to Safari only supporting H264 and the bridge sending VP8.
-        return !this.isSafariWithWebrtc();
+        // Older versions of Safari using webrtc/adapter do not support video
+        // due in part to Safari only supporting H264 and the bridge sending VP8
+        // Newer Safari support VP8 and other WebRTC features.
+        return !this.isSafariWithWebrtc()
+            || (this.isSafariWithVP8() && this.usesPlanB());
     }
 
     /**
@@ -238,7 +251,19 @@ export default class BrowserCapabilities extends BrowserDetection {
      * @returns {boolean}
      */
     usesUnifiedPlan() {
-        return this.isFirefox();
+        if (this.isFirefox()) {
+            return true;
+        }
+
+        if (this.isSafariWithVP8() && typeof window.RTCRtpTransceiver !== 'undefined') {
+            // eslint-disable-next-line max-len
+            // https://trac.webkit.org/changeset/236144/webkit/trunk/LayoutTests/webrtc/video-addLegacyTransceiver.html
+            // eslint-disable-next-line no-undef
+            return Object.keys(RTCRtpTransceiver.prototype)
+                   .indexOf('currentDirection') > -1;
+        }
+
+        return false;
     }
 
     /**
