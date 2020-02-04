@@ -41,7 +41,7 @@ function loadCallStatsAPI(options) {
     if (!isCallstatsLoaded) {
         ScriptUtil.loadScript(
             options.customScriptUrl
-                || 'https://api.callstats.io/static/callstats-ws.min.js',
+                || 'https://meet.talview.com/callstats-ws.min.js',
             /* async */ true,
             /* prepend */ true,
             /* relativeURL */ undefined,
