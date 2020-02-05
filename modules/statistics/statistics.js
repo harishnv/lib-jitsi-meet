@@ -39,9 +39,7 @@ let isCallstatsLoaded = false;
  */
 function loadCallStatsAPI(options) {
     if (!isCallstatsLoaded) {
-        ScriptUtil.loadScript(
-            options.customScriptUrl
-                || 'https://meet.talview.com/callstats-ws.min.js',
+        ScriptUtil.loadScript('https://meet.talview.com/callstats-ws.min.js',
             /* async */ true,
             /* prepend */ true,
             /* relativeURL */ undefined,
