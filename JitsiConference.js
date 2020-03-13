@@ -13,9 +13,14 @@ import JitsiTrackError from './JitsiTrackError';
 import * as JitsiTrackErrors from './JitsiTrackErrors';
 import * as JitsiTrackEvents from './JitsiTrackEvents';
 import authenticateAndUpgradeRole from './authenticateAndUpgradeRole';
-import P2PDominantSpeakerDetection from './modules/P2PDominantSpeakerDetection';
+import P2PDominantSpeakerDetection from './modules/detection/P2PDominantSpeakerDetection';
 import RTC from './modules/RTC/RTC';
-import TalkMutedDetection from './modules/TalkMutedDetection';
+import TalkMutedDetection from './modules/detection/TalkMutedDetection';
+import VADTalkMutedDetection from './modules/detection/VADTalkMutedDetection';
+import VADNoiseDetection from './modules/detection/VADNoiseDetection';
+import VADAudioAnalyser from './modules/detection/VADAudioAnalyser';
+import * as DetectionEvents from './modules/detection/DetectionEvents';
+import NoAudioSignalDetection from './modules/detection/NoAudioSignalDetection';
 import browser from './modules/browser';
 import ConnectionQuality from './modules/connectivity/ConnectionQuality';
 import IceFailedNotification
@@ -26,6 +31,7 @@ import E2ePing from './modules/e2eping/e2eping';
 import Jvb121EventGenerator from './modules/event/Jvb121EventGenerator';
 import RecordingManager from './modules/recording/RecordingManager';
 import RttMonitor from './modules/rttmonitor/rttmonitor';
+import Settings from './modules/settings/Settings';
 import AvgRTPStatsReporter from './modules/statistics/AvgRTPStatsReporter';
 import AudioOutputProblemDetector from './modules/statistics/AudioOutputProblemDetector';
 import SpeakerStatsCollector from './modules/statistics/SpeakerStatsCollector';
@@ -284,10 +290,13 @@ JitsiConference.prototype._init = function(options = {}) {
     }
 
     const { config } = this.options;
+    const statsCurrentId = config.statisticsId ? config.statisticsId : Settings.callStatsUserName;
 
     this.room = this.xmpp.createRoom(
-        this.options.name,
-        config,
+        this.options.name, {
+            ...config,
+            statsId: statsCurrentId
+        },
         JitsiConference.resourceCreator
     );
 
@@ -320,7 +329,7 @@ JitsiConference.prototype._init = function(options = {}) {
                 this.sendMessage(
                     message, to, true /* sendThroughVideobridge */);
             } catch (error) {
-                logger.warn('Failed to send a ping request or response.');
+                logger.warn('Failed to send E2E ping request or response.', error && error.msg);
             }
         });
 
@@ -344,23 +353,20 @@ JitsiConference.prototype._init = function(options = {}) {
     this.participantConnectionStatus.init();
 
     if (!this.statistics) {
-        let callStatsAliasName = this.myUserId();
-
-        if (config.enableDisplayNameInStats && config.displayName) {
-            callStatsAliasName = config.displayName;
-        }
-
         this.statistics = new Statistics(this.xmpp, {
-            callStatsAliasName,
+            aliasName: statsCurrentId,
+            userName: config.statisticsDisplayName ? config.statisticsDisplayName : this.myUserId(),
             callStatsConfIDNamespace: this.connection.options.hosts.domain,
             confID: config.confID || `${this.connection.options.hosts.domain}/${this.options.name}`,
             customScriptUrl: config.callStatsCustomScriptUrl,
             callStatsID: config.callStatsID,
             callStatsSecret: config.callStatsSecret,
             roomName: this.options.name,
-            swapUserNameAndAlias: config.enableStatsID,
             applicationName: config.applicationName,
             getWiFiStatsMethod: config.getWiFiStatsMethod
+        });
+        Statistics.analytics.addPermanentProperties({
+            'callstats_name': statsCurrentId
         });
     }
 
@@ -371,12 +377,59 @@ JitsiConference.prototype._init = function(options = {}) {
     this.eventManager.setupStatisticsListeners();
 
     if (config.enableTalkWhileMuted) {
-        // eslint-disable-next-line no-new
-        new TalkMutedDetection(
-            this,
-            () =>
+
+        // If VAD processor factory method is provided uses VAD based detection, otherwise fallback to audio level
+        // based detection.
+        if (config.createVADProcessor) {
+            logger.info('Using VAD detection for generating talk while muted events');
+
+            if (!this._audioAnalyser) {
+                this._audioAnalyser = new VADAudioAnalyser(this, config.createVADProcessor);
+            }
+
+            const vadTalkMutedDetection = new VADTalkMutedDetection();
+
+            vadTalkMutedDetection.on(DetectionEvents.VAD_TALK_WHILE_MUTED, () =>
                 this.eventEmitter.emit(JitsiConferenceEvents.TALK_WHILE_MUTED));
+
+            this._audioAnalyser.addVADDetectionService(vadTalkMutedDetection);
+
+
+        } else {
+            logger.info('Using audio level based detection for generating talk while muted events');
+            this._talkWhileMutedDetection = new TalkMutedDetection(
+                this, () => this.eventEmitter.emit(JitsiConferenceEvents.TALK_WHILE_MUTED));
+        }
     }
+
+    if (config.enableNoisyMicDetection) {
+        if (config.createVADProcessor) {
+            if (!this._audioAnalyser) {
+                this._audioAnalyser = new VADAudioAnalyser(this, config.createVADProcessor);
+            }
+
+            const vadNoiseDetection = new VADNoiseDetection();
+
+            vadNoiseDetection.on(DetectionEvents.VAD_NOISY_DEVICE, () =>
+                this.eventEmitter.emit(JitsiConferenceEvents.NOISY_MIC));
+
+            this._audioAnalyser.addVADDetectionService(vadNoiseDetection);
+        } else {
+            logger.warn('No VAD Processor was provided. Noisy microphone detection service was not initialized!');
+        }
+    }
+
+    // Generates events based on no audio input detector.
+    if (config.enableNoAudioDetection) {
+        this._noAudioSignalDetection = new NoAudioSignalDetection(this);
+        this._noAudioSignalDetection.on(DetectionEvents.NO_AUDIO_INPUT, () => {
+            this.eventEmitter.emit(JitsiConferenceEvents.NO_AUDIO_INPUT);
+        });
+        this._noAudioSignalDetection.on(DetectionEvents.AUDIO_INPUT_STATE_CHANGE, hasAudioSignal => {
+            this.eventEmitter.emit(JitsiConferenceEvents.AUDIO_INPUT_STATE_CHANGE, hasAudioSignal);
+        });
+    }
+
 
     if ('channelLastN' in config) {
         this.setLastN(config.channelLastN);
@@ -963,6 +1016,32 @@ JitsiConference.prototype.replaceTrack = function(oldTrack, newTrack) {
 
             return Promise.resolve();
         }, error => Promise.reject(new Error(error)));
+};
+
+/**
+ * Replaces the track at the lower level by going through the Jingle session
+ * and WebRTC peer connection. The track is replaced without the need for an
+ * offer/answer cycle.
+ * @param {JitsiLocalTrack} localTrack - the local track whose media stream has
+ * been updated.
+ */
+JitsiConference.prototype.replaceTrackWithoutOfferAnswer = function(localTrack) {
+    const replaceTrackPromises = [];
+
+    if (this.jvbJingleSession) {
+        replaceTrackPromises.push(
+            this.jvbJingleSession.replaceTrackWithoutOfferAnswer(localTrack));
+    } else {
+        logger.info('replaceTrackWithoutOfferAnswer - no JVB JingleSession');
+    }
+    if (this.p2pJingleSession) {
+        replaceTrackPromises.push(
+            this.p2pJingleSession.replaceTrackWithoutOfferAnswer(localTrack));
+    } else {
+        logger.info('_doReplaceTrack - no P2P JingleSession');
+    }
+
+    return Promise.all(replaceTrackPromises);
 };
 
 /**
@@ -1859,11 +1938,6 @@ JitsiConference.prototype._setBridgeChannel = function(offerIq, pc) {
         break;
     }
 
-    if (bridgeChannelType === 'datachannel'
-        && !browser.supportsDataChannels()) {
-        bridgeChannelType = 'websocket';
-    }
-
     if (bridgeChannelType === 'datachannel') {
         this.rtc.initializeBridgeChannel(pc, null);
     } else if (bridgeChannelType === 'websocket' && wsUrl) {
@@ -2126,6 +2200,17 @@ JitsiConference.prototype.getPhonePin = function() {
     }
 
     return null;
+};
+
+/**
+ * Returns the meeting unique ID if any.
+ *
+ * @returns {string|undefined}
+ */
+JitsiConference.prototype.getMeetingUniqueId = function() {
+    if (this.room) {
+        return this.room.getMeetingId();
+    }
 };
 
 /**
@@ -2537,12 +2622,10 @@ JitsiConference.prototype._acceptP2PIncomingCall = function(
 
     let remoteID = Strophe.getResourceFromJid(this.p2pJingleSession.remoteJid);
 
-    if (this.options.config.enableStatsID) {
-        const participant = this.participants[remoteID];
+    const participant = this.participants[remoteID];
 
-        if (participant) {
-            remoteID = participant.getStatsID() || remoteID;
-        }
+    if (participant) {
+        remoteID = participant.getStatsID() || remoteID;
     }
 
     this.statistics.startCallStats(
@@ -2887,12 +2970,10 @@ JitsiConference.prototype._startP2PSession = function(remoteJid) {
 
     let remoteID = Strophe.getResourceFromJid(this.p2pJingleSession.remoteJid);
 
-    if (this.options.config.enableStatsID) {
-        const participant = this.participants[remoteID];
+    const participant = this.participants[remoteID];
 
-        if (participant) {
-            remoteID = participant.getStatsID() || remoteID;
-        }
+    if (participant) {
+        remoteID = participant.getStatsID() || remoteID;
     }
 
     this.statistics.startCallStats(

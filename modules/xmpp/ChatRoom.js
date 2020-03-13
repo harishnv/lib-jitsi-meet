@@ -6,9 +6,10 @@ import { $iq, $msg, $pres, Strophe } from 'strophe.js';
 import GlobalOnErrorHandler from '../util/GlobalOnErrorHandler';
 import * as JitsiTranscriptionStatus from '../../JitsiTranscriptionStatus';
 import Listenable from '../util/Listenable';
-import Settings from '../settings/Settings';
 import * as MediaType from '../../service/RTC/MediaType';
+import { createConferenceEvent } from '../../service/statistics/AnalyticsEvents';
 import XMPPEvents from '../../service/xmpp/XMPPEvents';
+import Statistics from '../statistics/statistics';
 
 import Moderator from './moderator';
 
@@ -140,10 +141,10 @@ export default class ChatRoom extends Listenable {
         this.presMap.xns = 'http://jabber.org/protocol/muc';
         this.presMap.nodes = [];
 
-        if (options.enableStatsID) {
+        if (options.statsId) {
             this.presMap.nodes.push({
                 'tagName': 'stats-id',
-                'value': Settings.callStatsUserName
+                'value': options.statsId
             });
         }
 
@@ -278,10 +279,38 @@ export default class ChatRoom extends Listenable {
                 this.eventEmitter.emit(XMPPEvents.MUC_LOCK_CHANGED, locked);
                 this.locked = locked;
             }
+
+            const meetingIdValEl
+                = $(result).find('>query>x[type="result"]>field[var="muc#roominfo_meetingId"]>value');
+
+            if (meetingIdValEl.length) {
+                this.setMeetingId(meetingIdValEl.text());
+            } else {
+                logger.trace('No meeting ID from backend');
+            }
         }, error => {
             GlobalOnErrorHandler.callErrorHandler(error);
             logger.error('Error getting room info: ', error);
         });
+    }
+
+    /**
+     * Sets the meeting unique Id (received from the backend).
+     *
+     * @param {string} meetingId - The new meetings id.
+     * @returns {void}
+     */
+    setMeetingId(meetingId) {
+        if (this.meetingId !== meetingId) {
+            if (this.meetingId) {
+                logger.warn(`Meeting Id changed from:${this.meetingId} to:${meetingId}`);
+            }
+            this.meetingId = meetingId;
+
+            // The name of the action is a little bit confusing but it seems this is the preferred name by the consumers
+            // of the analytics events.
+            Statistics.sendAnalytics(createConferenceEvent('joined', { meetingId }));
+        }
     }
 
     /**
@@ -479,6 +508,10 @@ export default class ChatRoom extends Listenable {
                 this.sendPresence();
 
                 this.eventEmitter.emit(XMPPEvents.MUC_JOINED);
+
+                // Now let's check the disco-info to retrieve the
+                // meeting Id if any
+                this.discoRoomInfo();
             }
         } else if (jid === undefined) {
             logger.info('Ignoring member with undefined JID');
@@ -932,11 +965,7 @@ export default class ChatRoom extends Listenable {
         }
 
         if (from === this.roomjid
-                && $(msg)
-                    .find(
-                        '>x[xmlns="http://jabber.org/protocol/muc#user"]'
-                            + '>status[code="104"]')
-                    .length) {
+                && $(msg).find('>x[xmlns="http://jabber.org/protocol/muc#user"]>status[code="104"]').length) {
             this.discoRoomInfo();
         }
         const jsonMessage = $(msg).find('>json-message').text();
@@ -1362,6 +1391,15 @@ export default class ChatRoom extends Listenable {
      */
     getPhonePin() {
         return this.phonePin;
+    }
+
+    /**
+     * Returns the meeting unique ID if any came from backend.
+     *
+     * @returns {string} - The meeting ID.
+     */
+    getMeetingId() {
+        return this.meetingId;
     }
 
     /**
