@@ -110,6 +110,9 @@ function formatJitsiTrackErrorForCallStats(error) {
  */
 Statistics.init = function(options) {
     Statistics.audioLevelsEnabled = !options.disableAudioLevels;
+    if (typeof options.pcStatsInterval === 'number') {
+        Statistics.pcStatsInterval = options.pcStatsInterval;
+    }
 
     if (typeof options.audioLevelsInterval === 'number') {
         Statistics.audioLevelsInterval = options.audioLevelsInterval;
@@ -159,6 +162,8 @@ export default function Statistics(xmpp, options) {
             // requests to any third parties.
             && (Statistics.disableThirdPartyRequests !== true);
     if (this.callStatsIntegrationEnabled) {
+        this.callStatsApplicationLogsDisabled
+            = this.options.callStatsApplicationLogsDisabled;
         if (browser.isReactNative()) {
             _initCallStatsBackend(this.options);
         } else {
@@ -186,6 +191,7 @@ export default function Statistics(xmpp, options) {
 }
 Statistics.audioLevelsEnabled = false;
 Statistics.audioLevelsInterval = 200;
+Statistics.pcStatsInterval = 10000;
 Statistics.disableThirdPartyRequests = false;
 Statistics.analytics = analytics;
 
@@ -216,7 +222,7 @@ Statistics.prototype.startRemoteStats = function(peerconnection) {
             = new RTPStats(
                 peerconnection,
                 Statistics.audioLevelsInterval,
-                2000,
+                Statistics.pcStatsInterval,
                 this.eventEmitter);
 
         rtpStats.start(Statistics.audioLevelsEnabled);
@@ -664,6 +670,10 @@ Statistics.sendLog = function(m) {
     // unique conference ID rather than selecting the first one.
     // We don't have such use case though, so leaving as is for now.
     for (const stats of Statistics.instances) {
+        if (stats.callStatsApplicationLogsDisabled) {
+            return;
+        }
+
         if (stats.callsStatsInstances.size) {
             globalSubSet.add(stats.callsStatsInstances.values().next().value);
         }
